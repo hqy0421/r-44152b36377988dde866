@@ -47,7 +47,8 @@ def dump_pipeline_to_json(pipeline: Pipeline) -> dict[str, dict[str, Any]]:
     'copy': False,
     'verbose': False,
     'return_native': True,
-    'weights_column': None},
+    'weights_column': None,
+    'add_indicator': False},
     'fit': {'is_fitted_': True, 'impute_values_': {'b': 15.0}}},
     'mean_imputer': {'tubular_version':...,
     'classname': 'MeanImputer',
@@ -55,7 +56,8 @@ def dump_pipeline_to_json(pipeline: Pipeline) -> dict[str, dict[str, Any]]:
     'copy': False,
     'verbose': False,
     'return_native': True,
-    'weights_column': None},
+    'weights_column': None,
+    'add_indicator': False},
         'fit': {'is_fitted_': True, 'impute_values_': {'b': 15.0}}}}
 
     ```

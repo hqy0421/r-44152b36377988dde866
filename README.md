@@ -91,7 +91,8 @@ pipeline_json
 #          'copy': False,
 #          'verbose': False,
 #          'return_native': True,
-#          'weights_column': None
+#          'weights_column': None,
+#          'add_indicator': False
 #          },
 #     'fit': {
 #           'impute_values_': {'b': 10.0}
@@ -105,7 +106,8 @@ pipeline_json
 #          'copy': False,
 #          'verbose': False,
 #          'return_native': True,
-#          'weights_column': None
+#          'weights_column': None,
+#          'add_indicator': False
 #           },
 #      'fit': {
 #          'impute_values_': {
@@ -123,6 +125,48 @@ print(pipeline)
 # Printed value:
 # Pipeline(steps=[('MedianImputer', MedianImputer(columns=['b'])),
 #                 ('MeanImputer', MeanImputer(columns=['b']))])
+```
+
+### Keeping the missingness signal when imputing
+
+`NullIndicator` and the imputers each look at nulls when they run, so a `Pipeline`
+that imputes before applying `NullIndicator` will see the filled values and produce
+all-`False` indicators. Where the model needs both the imputed value *and* a record
+of whether it was missing, set `add_indicator=True` on the imputer. The indicator is
+created in the same transform call, from the incoming row only, so it survives
+reordering and never carries training-time null patterns into prediction rows.
+
+```python
+import polars as pl
+from sklearn.pipeline import Pipeline
+from tubular.imputers import MeanImputer
+from tubular.pipeline import dump_pipeline_to_json, load_pipeline_from_json
+
+train_df = pl.DataFrame({"a": [1.0, None, 3.0], "b": [10.0, 20.0, 30.0]})
+predict_df = pl.DataFrame({"a": [None, 5.0], "b": [40.0, 50.0]})
+
+pipeline = Pipeline(
+    [("imputer", MeanImputer(columns=["a"], add_indicator=True))]
+).fit(train_df)
+
+pipeline.transform(predict_df)
+# shape: (2, 3)
+# ┌─────┬──────┬─────────┐
+# │ a   ┆ b    ┆ a_nulls │
+# │ --- ┆ ---  ┆ ---     │
+# │ f64 ┆ f64  ┆ bool    │
+# ╞═════╪══════╪═════════╡
+# │ 2.0 ┆ 40.0 ┆ true    │
+# │ 5.0 ┆ 50.0 ┆ false   │
+# └─────┴──────┴─────────┘
+
+# the pairing is explicit and per column
+pipeline.named_steps["imputer"].null_indicator_columns_
+# {'a': 'a_nulls'}
+
+# and it survives a json round trip
+reloaded = load_pipeline_from_json(dump_pipeline_to_json(pipeline))
+reloaded.transform(predict_df)  # same three columns
 ```
 
 We are currently in the process of rolling out support for polars lazyframes!

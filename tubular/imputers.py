@@ -25,6 +25,7 @@ from tubular._utils import (
 )
 from tubular.base import BaseTransformer, register
 from tubular.functions.imputers import (
+    get_null_indicator_column_name,
     impute_boolean_columns,
     impute_categorical_columns,
     impute_enum_columns,
@@ -45,6 +46,14 @@ class BaseImputer(BaseTransformer):
 
     Attributes
     ----------
+    add_indicator : bool, default = False
+        Should indicator columns be created for the nulls filled in? If True, a
+        boolean column named "<column>_nulls" is added for each column in
+        columns, capturing whether the value was null *before* imputation was
+        applied. Both the indicator and the imputed value are produced in a
+        single transform call, so the indicator always reflects the incoming
+        row and cannot be separated from imputation by reordering a pipeline.
+
     built_from_json: bool
         indicates if transformer was reconstructed from json, which limits it's supported
         functionality to .transform
@@ -84,6 +93,165 @@ class BaseImputer(BaseTransformer):
 
     FITS = False
 
+    @beartype
+    def __init__(
+        self,
+        columns: ListOfStrs | str,
+        add_indicator: bool = False,
+        **kwargs: bool | None,
+    ) -> None:
+        """Initialise class instance.
+
+        Parameters
+        ----------
+        columns : str or list of strs
+            Columns to impute.
+
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
+            The indicator is computed from the row being transformed, never from
+            values learnt at fit, so prediction rows are flagged on their own nulls
+            only.
+
+        **kwargs
+            Arbitrary keyword arguments passed onto BaseTransformer.init method.
+
+        Examples
+        --------
+        ```pycon
+        >>> BaseImputer(columns=["a", "b"], add_indicator=True)
+        BaseImputer(add_indicator=True, columns=['a', 'b'])
+
+        ```
+
+        """
+        super().__init__(columns=columns, **kwargs)
+
+        self.add_indicator = add_indicator
+
+    @property
+    def null_indicator_columns_(self) -> dict[str, str]:
+        """Mapping of imputed columns to the indicator columns created for them.
+
+        Returns
+        -------
+        dict[str, str]:
+            mapping of column name to indicator column name, one entry per column
+            in columns. Useful for interpreting output column by column.
+
+        Examples
+        --------
+        ```pycon
+        >>> imputer = BaseImputer(columns=["a", "b"], add_indicator=True)
+
+        >>> imputer.null_indicator_columns_
+        {'a': 'a_nulls', 'b': 'b_nulls'}
+
+        ```
+
+        """
+        return {
+            column: get_null_indicator_column_name(column) for column in self.columns
+        }
+
+    def get_feature_names_out(self) -> list[str]:
+        """List features modified/created by the transformer.
+
+        Returns
+        -------
+        list[str]:
+            list of features modified/created by the transformer, including the
+            indicator columns if add_indicator is True
+
+        Examples
+        --------
+        ```pycon
+        >>> imputer = BaseImputer(columns=["a", "b"], add_indicator=True)
+
+        >>> imputer.get_feature_names_out()
+        ['a', 'b', 'a_nulls', 'b_nulls']
+
+        >>> imputer = BaseImputer(columns=["a", "b"])
+
+        >>> imputer.get_feature_names_out()
+        ['a', 'b']
+
+        ```
+
+        """
+        if not self.add_indicator:
+            return [*self.columns]
+
+        return [*self.columns, *self.null_indicator_columns_.values()]
+
+    def get_indicator_exprs(self) -> list[nw.Expr]:
+        """Get expressions creating null indicator columns.
+
+        Returns
+        -------
+        list[nw.Expr]: indicator expressions, or an empty list if
+        add_indicator is False
+
+        Examples
+        --------
+        ```pycon
+        >>> imputer = BaseImputer(columns=["a", "b"], add_indicator=True)
+
+        >>> imputer.null_indicator_columns_
+        {'a': 'a_nulls', 'b': 'b_nulls'}
+
+        >>> len(imputer.get_indicator_exprs())
+        2
+
+        >>> imputer = BaseImputer(columns=["a", "b"])
+
+        >>> imputer.get_indicator_exprs()
+        []
+
+        ```
+
+        """
+        if not self.add_indicator:
+            return []
+
+        return indicate_nulls_for_columns(columns=self.columns)
+
+    def _apply_transform_exprs(
+        self,
+        X: nw.DataFrame | nw.LazyFrame,
+        transform_exprs: list[nw.Expr],
+    ) -> nw.DataFrame | nw.LazyFrame:
+        """Apply indicator and imputation expressions to X.
+
+        Indicator expressions are applied in a separate step, before imputation,
+        so that indicators always describe the values in the incoming row,
+        independently of where the imputer sits in a pipeline.
+
+        Parameters
+        ----------
+        X: narwhals dataframe
+            Data to transform.
+
+        transform_exprs: list[nw.Expr]
+            Imputation expressions to apply.
+
+        Returns
+        -------
+        narwhals dataframe: transformed data
+
+        """
+        indicator_exprs = self.get_indicator_exprs()
+
+        if indicator_exprs:
+            X = X.with_columns(*indicator_exprs)
+
+        if transform_exprs:
+            X = X.with_columns(*transform_exprs)
+
+        return X
+
     @block_from_json
     def to_json(self) -> dict[str, dict[str, Any]]:
         """Dump transformer to json dict.
@@ -106,7 +274,7 @@ class BaseImputer(BaseTransformer):
 
         >>> # version will vary for local vs CI, so use ... as generic match
         >>> arbitrary_imputer.to_json()
-        {'tubular_version': ..., 'classname': 'ArbitraryImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'impute_value': 1}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 1, 'b': 1}}}
+        {'tubular_version': ..., 'classname': 'ArbitraryImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'impute_value': 1, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 1, 'b': 1}}}
 
         >>> mean_imputer = MeanImputer(columns=["a", "b"])
 
@@ -115,7 +283,7 @@ class BaseImputer(BaseTransformer):
         >>> _ = mean_imputer.fit(test_df)
 
         >>> mean_imputer.to_json()
-        {'tubular_version': ..., 'classname': 'MeanImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 1.0, 'b': 2.0}}}
+        {'tubular_version': ..., 'classname': 'MeanImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 1.0, 'b': 2.0}}}
 
         ```
 
@@ -154,6 +322,8 @@ class BaseImputer(BaseTransformer):
             ),
         ):
             json_dict["init"]["impute_value"] = self.impute_value
+
+        json_dict["init"]["add_indicator"] = self.add_indicator
 
         json_dict["fit"]["impute_values_"] = _sort_dict(self.impute_values_)
 
@@ -245,7 +415,7 @@ class BaseImputer(BaseTransformer):
 
         transform_expressions = self.get_transform_exprs()
 
-        X = X.with_columns(*transform_expressions) if transform_expressions else X
+        X = self._apply_transform_exprs(X, transform_expressions)
 
         return _return_narwhals_or_native_dataframe(X, return_native)
 
@@ -293,6 +463,7 @@ class NumberImputer(BaseImputer):
         self,
         impute_value: int | float,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -303,11 +474,15 @@ class NumberImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -378,7 +553,7 @@ class NumberImputer(BaseImputer):
 
         transform_exprs = self.get_transform_exprs()
 
-        X = X.with_columns(*transform_exprs) if transform_exprs else X
+        X = self._apply_transform_exprs(X, transform_exprs)
 
         return _return_narwhals_or_native_dataframe(X, self.return_native)
 
@@ -426,6 +601,7 @@ class StringImputer(BaseImputer):
         self,
         impute_value: str,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -436,11 +612,15 @@ class StringImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -512,7 +692,7 @@ class StringImputer(BaseImputer):
 
         transform_exprs = self.get_transform_exprs()
 
-        X = X.with_columns(*transform_exprs) if transform_exprs else X
+        X = self._apply_transform_exprs(X, transform_exprs)
 
         return _return_narwhals_or_native_dataframe(X, self.return_native)
 
@@ -560,6 +740,7 @@ class BooleanImputer(BaseImputer):
         self,
         impute_value: bool,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -570,11 +751,15 @@ class BooleanImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -663,7 +848,7 @@ class BooleanImputer(BaseImputer):
 
         transform_exprs = self.get_transform_exprs()
 
-        X = X.with_columns(*transform_exprs) if transform_exprs else X
+        X = self._apply_transform_exprs(X, transform_exprs)
 
         return _return_narwhals_or_native_dataframe(X, self.return_native)
 
@@ -711,6 +896,7 @@ class CategoricalImputer(BaseImputer):
         self,
         impute_value: str,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -721,11 +907,15 @@ class CategoricalImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -810,7 +1000,7 @@ class CategoricalImputer(BaseImputer):
 
         transform_exprs = self.get_transform_exprs()
 
-        X = X.with_columns(*transform_exprs) if transform_exprs else X
+        X = self._apply_transform_exprs(X, transform_exprs)
 
         return _return_narwhals_or_native_dataframe(X, self.return_native)
 
@@ -862,6 +1052,7 @@ class _EnumImputer(BaseImputer):
         self,
         impute_value: str,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -872,11 +1063,15 @@ class _EnumImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -976,7 +1171,7 @@ class _EnumImputer(BaseImputer):
             columns_to_categories=columns_to_categories
         )
 
-        X = X.with_columns(*transform_exprs) if transform_exprs else X
+        X = self._apply_transform_exprs(X, transform_exprs)
 
         return _return_narwhals_or_native_dataframe(X, self.return_native)
 
@@ -1027,7 +1222,7 @@ class MedianImputer(BaseImputer, WeightColumnMixin):
 
     >>> json_dump = median_imputer.to_json()
     >>> json_dump
-    {'tubular_version': ..., 'classname': 'MedianImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0.0, 'b': 1.0}}}
+    {'tubular_version': ..., 'classname': 'MedianImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0.0, 'b': 1.0}}}
 
     >>> MedianImputer.from_json(json_dump)
     MedianImputer(columns=['a', 'b'])
@@ -1049,6 +1244,7 @@ class MedianImputer(BaseImputer, WeightColumnMixin):
         self,
         columns: str | list[str],
         weights_column: str | None = None,
+        add_indicator: bool = False,
         **kwargs: bool,
     ) -> None:
         """Initialise class instance.
@@ -1062,11 +1258,16 @@ class MedianImputer(BaseImputer, WeightColumnMixin):
         weights_column: None or str, default=None
             Column containing weights
 
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
+
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
         self.weights_column = weights_column
 
     @block_from_json
@@ -1214,7 +1415,7 @@ class MeanImputer(WeightColumnMixin, BaseImputer):
 
     >>> json_dump = mean_imputer.to_json()
     >>> json_dump
-    {'tubular_version': ..., 'classname': 'MeanImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0.0, 'b': 1.0}}}
+    {'tubular_version': ..., 'classname': 'MeanImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0.0, 'b': 1.0}}}
 
     >>> MeanImputer.from_json(json_dump)
     MeanImputer(columns=['a', 'b'])
@@ -1236,6 +1437,7 @@ class MeanImputer(WeightColumnMixin, BaseImputer):
         self,
         columns: str | list[str],
         weights_column: str | None = None,
+        add_indicator: bool = False,
         **kwargs: bool,
     ) -> None:
         """Initialise class instance.
@@ -1249,11 +1451,16 @@ class MeanImputer(WeightColumnMixin, BaseImputer):
         weights_column : None or str, default = None
             Column containing weights.
 
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
+
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
         self.weights_column = weights_column
 
     @block_from_json
@@ -1388,7 +1595,7 @@ class ModeImputer(BaseImputer, WeightColumnMixin):
 
     >>> json_dump = mode_imputer.to_json()
     >>> json_dump
-    {'tubular_version': ..., 'classname': 'ModeImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0, 'b': 1}}}
+    {'tubular_version': ..., 'classname': 'ModeImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'weights_column': None, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 0, 'b': 1}}}
 
     >>> ModeImputer.from_json(json_dump)
     ModeImputer(columns=['a', 'b'])
@@ -1410,6 +1617,7 @@ class ModeImputer(BaseImputer, WeightColumnMixin):
         self,
         columns: str | list[str],
         weights_column: str | None = None,
+        add_indicator: bool = False,
         **kwargs: bool,
     ) -> None:
         """Initialise class instance.
@@ -1424,11 +1632,16 @@ class ModeImputer(BaseImputer, WeightColumnMixin):
             Name of weights columns to use if mode should be in terms of sum of weights
             not count of rows.
 
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
+
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
         self.weights_column = weights_column
 
     @block_from_json
@@ -1559,6 +1772,17 @@ class NullIndicator(BaseTransformer):
     lazyframe_compatible: bool
         class attribute, indicates whether transformer works with lazyframes
 
+    Notes
+    -----
+    The indicators created by this transformer reflect the values in the data
+    passed to transform. If a pipeline imputes nulls before this transformer,
+    the indicators will see the imputed (non-null) values and come out all
+    False. Where both the imputed value and the original null indicator are
+    needed, use the ``add_indicator`` option on the relevant imputer instead;
+    it creates both from the same incoming row, so the pairing survives
+    reordering the pipeline and never carries training null patterns into
+    prediction rows.
+
     Examples
     --------
     ```pycon
@@ -1608,6 +1832,53 @@ class NullIndicator(BaseTransformer):
         """
         super().__init__(columns=columns, **kwargs)
         self.is_fitted_ = True  # does not fit
+
+    @property
+    def null_indicator_columns_(self) -> dict[str, str]:
+        """Mapping of input columns to the indicator columns created for them.
+
+        Returns
+        -------
+        dict[str, str]:
+            mapping of column name to indicator column name, one entry per column
+            in columns. Useful for interpreting output column by column, and
+            matches the naming used by the imputers' add_indicator option.
+
+        Examples
+        --------
+        ```pycon
+        >>> indicator = NullIndicator(columns=["a", "b"])
+
+        >>> indicator.null_indicator_columns_
+        {'a': 'a_nulls', 'b': 'b_nulls'}
+
+        ```
+
+        """
+        return {
+            column: get_null_indicator_column_name(column) for column in self.columns
+        }
+
+    def get_feature_names_out(self) -> list[str]:
+        """List features modified/created by the transformer.
+
+        Returns
+        -------
+        list[str]:
+            list of indicator columns created by the transformer
+
+        Examples
+        --------
+        ```pycon
+        >>> indicator = NullIndicator(columns=["a", "b"])
+
+        >>> indicator.get_feature_names_out()
+        ['a_nulls', 'b_nulls']
+
+        ```
+
+        """
+        return list(self.null_indicator_columns_.values())
 
     def get_transform_exprs(self) -> list[nw.Expr]:
         """Get transform expressions.
@@ -1715,7 +1986,7 @@ class ArbitraryImputer(BaseImputer):
     >>> # transformer can also be dumped to json and reinitialised
     >>> json_dump = arbitrary_imputer.to_json()
     >>> json_dump
-    {'tubular_version': ..., 'classname': 'ArbitraryImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'impute_value': 5}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 5, 'b': 5}}}
+    {'tubular_version': ..., 'classname': 'ArbitraryImputer', 'init': {'columns': ['a', 'b'], 'copy': False, 'verbose': False, 'return_native': True, 'impute_value': 5, 'add_indicator': False}, 'fit': {'is_fitted_': True, 'impute_values_': {'a': 5, 'b': 5}}}
 
     >>> ArbitraryImputer.from_json(json_dump)
     ArbitraryImputer(columns=['a', 'b'], impute_value=5)
@@ -1737,6 +2008,7 @@ class ArbitraryImputer(BaseImputer):
         self,
         impute_value: int | float | str | bool,
         columns: str | list[str],
+        add_indicator: bool = False,
         **kwargs: bool | None,
     ) -> None:
         """Initialise class instance.
@@ -1747,11 +2019,15 @@ class ArbitraryImputer(BaseImputer):
             Value to impute nulls with.
         columns : str or list of strs
             Columns to impute
+        add_indicator : bool, default = False
+            Should indicator columns be created for the nulls filled in? If True,
+            a boolean column named "<column>_nulls" is added for each column in
+            columns, recording whether the incoming value was null before imputation.
         **kwargs
             Arbitrary keyword arguments passed onto BaseTransformer.init method.
 
         """
-        super().__init__(columns=columns, **kwargs)
+        super().__init__(columns=columns, add_indicator=add_indicator, **kwargs)
 
         self.impute_values_ = {}
         self.impute_value = impute_value
@@ -1810,6 +2086,7 @@ class ArbitraryImputer(BaseImputer):
             imp = NumberImputer(
                 columns=self.columns,
                 impute_value=self.impute_value,
+                add_indicator=self.add_indicator,
                 return_native=self.return_native,
             )
 
@@ -1820,6 +2097,7 @@ class ArbitraryImputer(BaseImputer):
                 imp = StringImputer(
                     columns=self.columns,
                     impute_value=self.impute_value,
+                    add_indicator=self.add_indicator,
                     return_native=self.return_native,
                 )
 
@@ -1827,6 +2105,7 @@ class ArbitraryImputer(BaseImputer):
                 imp = CategoricalImputer(
                     columns=self.columns,
                     impute_value=self.impute_value,
+                    add_indicator=self.add_indicator,
                     return_native=self.return_native,
                 )
 
@@ -1834,6 +2113,7 @@ class ArbitraryImputer(BaseImputer):
                 imp = _EnumImputer(
                     columns=self.columns,
                     impute_value=self.impute_value,
+                    add_indicator=self.add_indicator,
                     return_native=self.return_native,
                 )
 
@@ -1850,6 +2130,7 @@ class ArbitraryImputer(BaseImputer):
             imp = BooleanImputer(
                 columns=self.columns,
                 impute_value=self.impute_value,
+                add_indicator=self.add_indicator,
                 return_native=self.return_native,
             )
 

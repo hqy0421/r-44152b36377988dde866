@@ -79,6 +79,7 @@ class TestPipelineDumpAndLoadJson:
                     "return_native": mean_imputer.return_native,
                     "verbose": mean_imputer.verbose,
                     "weights_column": mean_imputer.weights_column,
+                    "add_indicator": mean_imputer.add_indicator,
                 },
             },
             "median_imputer": {
@@ -93,6 +94,7 @@ class TestPipelineDumpAndLoadJson:
                     "return_native": median_imputer.return_native,
                     "verbose": median_imputer.verbose,
                     "weights_column": median_imputer.weights_column,
+                    "add_indicator": median_imputer.add_indicator,
                 },
             },
         }

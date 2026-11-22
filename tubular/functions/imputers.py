@@ -7,6 +7,34 @@ import narwhals as nw
 from tubular.types import ListOfStrs
 
 
+def get_null_indicator_column_name(column: str) -> str:
+    """Return the name of the null indicator column created for a column.
+
+    This is the single source of truth for indicator column naming, shared by
+    NullIndicator and the imputers' ``add_indicator`` option, so that either
+    can be used and the resulting columns can be interpreted column by column.
+
+    Parameters
+    ----------
+    column: str
+        Name of the column the indicator is created for.
+
+    Returns
+    -------
+    str: name of the indicator column
+
+    Examples
+    --------
+    ```pycon
+    >>> get_null_indicator_column_name("a")
+    'a_nulls'
+
+    ```
+
+    """
+    return f"{column}_nulls"
+
+
 def indicate_nulls_for_columns(columns: ListOfStrs | str) -> list[nw.Expr]:
     """Return the positions of null values for each column.
 
@@ -20,7 +48,9 @@ def indicate_nulls_for_columns(columns: ListOfStrs | str) -> list[nw.Expr]:
     list[nw.Expr]: transform expressions
 
     """
-    return [(nw.col(c).is_null()).alias(f"{c}_nulls") for c in columns]
+    return [
+        (nw.col(c).is_null()).alias(get_null_indicator_column_name(c)) for c in columns
+    ]
 
 
 def impute_numeric_or_string_nulls(

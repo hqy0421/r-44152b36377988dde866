@@ -31,6 +31,8 @@ Each individual change should have a link to the pull request after the descript
 -------------------
 Changed
 ^^^^^^^
+- feat: added optional ``add_indicator`` argument to all imputers (NumberImputer, StringImputer, BooleanImputer, CategoricalImputer, MeanImputer, MedianImputer, ModeImputer and deprecated ArbitraryImputer). When True, the imputer creates a ``<column>_nulls`` boolean column recording which values were null *before* imputation, in the same transform call. This keeps the imputed value and the original missingness signal paired regardless of pipeline ordering, and flags nulls in prediction rows from the prediction data only (no training null patterns carried over). The option is persisted through ``to_json``/``from_json``.
+- feat: added ``null_indicator_columns_`` property and ``get_feature_names_out`` implementations to imputers and NullIndicator, so imputed and indicator columns can be interpreted column by column.
 - chore: switched codespaces and github actions to use pyproject.toml for env, removed req.text file
 - feat: added min/max version testing in github actions
 - chore: removed cap on polars version
